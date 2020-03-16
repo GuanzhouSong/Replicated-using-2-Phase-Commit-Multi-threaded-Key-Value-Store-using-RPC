@@ -1,6 +1,5 @@
 package server;
 
-public enum AckType 
-{
-	AkcPrepare, ackGo
+public enum AckType {
+    AkcPrepare, ackGo
 }
