@@ -1,235 +1,286 @@
 package server;
 
+import ENUM.AckType;
 import compute.ServerInterface;
+import java.rmi.Naming;
 import java.rmi.RemoteException;
-import java.rmi.registry.LocateRegistry;
-import java.rmi.registry.Registry;
-import java.util.Collections;
-import java.util.HashMap;
+import java.security.spec.InvalidParameterSpecException;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import util.Util;
 
 
 public class Server extends Thread implements ServerInterface {
 
-    static Helper hl = new Helper();
-    ReadWriteLock rwl = new ReadWriteLock();
     private int[] otherServers = new int[4];
     private int myPort;
-    private Map<UUID, Value> pendingChanges = Collections.synchronizedMap(new HashMap<UUID, Value>());
-    private Map<UUID, Map<Integer, Ack>> pendingPrepareAcks = Collections.synchronizedMap(new HashMap<UUID, Map<Integer, Ack>>());
-    private Map<UUID, Map<Integer, Ack>> pendingGoAcks = Collections.synchronizedMap(new HashMap<UUID, Map<Integer, Ack>>());
+    static Util util = new Util();
+    private Map<String, String> map = new ConcurrentHashMap<>();
+    private Map<UUID, String> pendingChanges = new ConcurrentHashMap<>();
+    private Map<UUID, Map<Integer, Ack>> pendingPrepareAcks = new ConcurrentHashMap<>();
+    private Map<UUID, Map<Integer, Ack>> pendingCommitAcks = new ConcurrentHashMap<>();
 
-    public String KeyValue(String functionality, String key, String value) {
-        String message = "";
-        String fileName = "keyValueStore_" + myPort + ".txt";
-        KeyList k1 = new KeyList(fileName);
-        try {
-            if (functionality.equalsIgnoreCase("GET")) {
-                hl.log("Looking for key: "
-                    + key
-                    + " - from client: ");
-                rwl.lockRead();
-                message += key + " : "
-                    + k1.isInStore(key);
-                rwl.unlockRead();
-            } else if (functionality.equalsIgnoreCase("PUT")) {
-                hl.log("Writing the key: "
-                    + key
-                    + " and value: "
-                    + value
-                    + " - from client: ");
-                rwl.lockWrite();
-                message += key + " : "
-                    + k1.putInStore(key, value);
-                rwl.unlockWrite();
-            } else {
-                hl.log("Deleting " + key);
-                rwl.lockWrite();
-                message += key + " : "
-                    + k1.deleteKeyValue(key);
-                rwl.unlockWrite();
-            }
-        } catch (Exception e) {
-            hl.log(e.getMessage());
+    /**
+     * take command and respond.
+     *
+     * @param cmd command received from client
+     * @return respond to client.
+     * @throws InvalidParameterSpecException if command line is invalid or action is not legal.
+     */
+    @Override
+    public String process(String cmd) throws InvalidParameterSpecException, RemoteException {
+        String msg;
+
+        String[] formattedInput = cmd.split(" ", 2);
+        cmd = formattedInput[1];
+
+        //check if the command's first arg is valid.
+        String[] arguments = cmd.split(" ");
+        if (!"putgetdelete".contains(arguments[0].toLowerCase())) {
+            throw new InvalidParameterSpecException("Invalid arguments other than PUT/GET/DELETE.");
         }
-        return (message + "\n");
+
+        switch (arguments[0].toLowerCase()) {
+            case "put": {
+                String key, value;
+                try {
+                    key = arguments[1];
+                    value = cmd.split("\"")[1];
+                    if (value == null || "".equals(value) || key == null || "".equals(key)) {
+                        throw new Exception();
+                    }
+                } catch (Exception e) {
+                    //error when command is invalid and  not in the correct format.
+                    throw new InvalidParameterSpecException("Invalid PUT operation: PUT <KEY> \"<VALUE>\"");
+                }
+
+                map.put(key, value);
+                msg = "OK";
+                System.out.println(util.getFormattedTime() + "Server " + this.myPort + ": PUT(" + key + ", " + value + ")");
+                break;
+            }
+            case "get": {
+                if (arguments.length != 2) {
+                    //error when command is invalid and  not in the correct format.
+                    throw new InvalidParameterSpecException("Invalid GET operation: GET <key>");
+                }
+                try {
+                    if (!map.containsKey(arguments[1])) {
+                        throw new Exception();
+                    }
+                    msg = map.get(arguments[1]);
+                    System.out.println(util.getFormattedTime() + "GET(" + arguments[1] + ")");
+                } catch (Exception e) {
+                    //error when command is invalid, trying to get using a non-existing key.
+                    throw new InvalidParameterSpecException("Invalid Key: key \"" + arguments[1] + "\" does NOT exist");
+                }
+                break;
+            }
+            case "delete": {
+                if (arguments.length != 2) {
+                    //error when command is invalid and  not in the correct format.
+                    throw new InvalidParameterSpecException("Invalid GET operation: DELETE <key>");
+                }
+                try {
+                    if (!map.containsKey(arguments[1])) {
+                        throw new Exception();
+                    }
+                    map.remove(arguments[1]);
+                    msg = (arguments[1] + " Deleted");
+                    System.out.println(util.getFormattedTime() + "DELETE(" + arguments[1] + ")");
+                } catch (Exception e) {
+                    //error when command is invalid, trying to delete using a non-existing key.
+                    throw new InvalidParameterSpecException("Invalid Key: key \"" + arguments[1] + "\" does  NOT exist");
+                }
+                break;
+            }
+            default:
+                //command is invalid, does not start with right arg.
+                throw new InvalidParameterSpecException("input operation is invalid, please use PUT/GET/DELETE");
+        }
+
+        return util.getFormattedTime() + msg;
     }
 
-    public String KeyValue(UUID messageId, String functionality, String key,
-        String value) throws RemoteException {
-        if (functionality.equalsIgnoreCase("GET")) {
-            return KeyValue(functionality, key, value);
+    @Override
+    public String process(UUID messageId, String cmd) throws RemoteException, InvalidParameterSpecException {
+        String[] arguments = cmd.split(" ");
+        int timeout = 100, retry = 5;
+        if ("GET".equalsIgnoreCase(arguments[1])) {
+            return process(cmd);
         }
-        addToTempStorage(messageId, functionality, key, value);
-        tellToPrepare(messageId, functionality, key, value);
-        boolean prepareSucc = waitAckPrepare(messageId, functionality, key, value);
-        if (!prepareSucc) {
-            return "fail";
-        }
-
-        tellToGo(messageId);
-        boolean goSucc = waitToAckGo(messageId);
-        if (!goSucc) {
-            return "fail";
+        this.pendingChanges.put(messageId, cmd);
+        String prepare = callPrepareAndWaitForAck(messageId, cmd, timeout, retry);
+        if (!"true".equalsIgnoreCase(prepare)) {
+            return util.getFormattedTime()+prepare;
         }
 
-        Value v = this.pendingChanges.get(messageId);
+        String commit = callCommitAndWaitForAck(messageId, timeout, retry);
+        if (!"true".equalsIgnoreCase(commit)) {
+            return util.getFormattedTime()+commit;
+        }
 
-        if (v == null) {
+        String pendingCMD = this.pendingChanges.get(messageId);
+
+        if (pendingCMD == null) {
             throw new IllegalArgumentException("The message is not in the storage");
         }
 
-        String message = this.KeyValue(v.function, v.key, v.value);
+        String message = this.process(pendingCMD);
         this.pendingChanges.remove(messageId);
+
         return message;
     }
 
-    private boolean waitToAckGo(UUID messageId) {
 
-        int areAllAck = 0;
-        int retry = 3;
+    private String callPrepareAndWaitForAck(UUID messageId, String cmd, int timeout, int retry) {
 
-        while (retry != 0) {
+        int AckReceived = 0;
+        this.pendingPrepareAcks.put(messageId, new ConcurrentHashMap<>());
+        while (retry >= 0) {
+
             try {
-                Thread.sleep(100);
+                Thread.sleep(timeout);
             } catch (Exception ex) {
-                hl.log("wait fail.");
+                util.log("wait fail.");
             }
-
-            areAllAck = 0;
-            retry--;
-            Map<Integer, Ack> map = this.pendingGoAcks.get(messageId);
-
-            for (int server : this.otherServers) {
-                if (map.get(server).isAcked) {
-                    areAllAck++;
-                } else {
-                    callGo(messageId, server);
-                }
-            }
-            if (areAllAck == 4) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private boolean waitAckPrepare(UUID messageId, String functionality, String key, String value) {
-
-        int areAllAck = 0;
-        int retry = 3;
-
-        while (retry != 0) {
-            try {
-                Thread.sleep(100);
-            } catch (Exception ex) {
-                hl.log("wait fail.");
-            }
-            areAllAck = 0;
+            AckReceived = 0;
             retry--;
             Map<Integer, Ack> map = this.pendingPrepareAcks.get(messageId);
             for (int server : this.otherServers) {
-                if (map.get(server).isAcked) {
-                    areAllAck++;
-                } else {
-                    callPrepare(messageId, functionality, key, value, server);
+                if (map.containsKey(server) && map.get(server).status == AckType.PREPARED) {
+                    AckReceived++;
+                } else if(map.containsKey(server) && map.get(server).status == AckType.ABORT){
+                    globalAbort(messageId);
+                    return map.get(server).getErrMsg();
+                }else {
+
+                    util.log("Prepare: Ask for prepare on server " + server);
+                    try {
+                        this.pendingPrepareAcks.get(messageId).put(server, new Ack());
+                        ServerInterface stub = (ServerInterface) Naming.lookup("rmi://localhost/MapService" + server);
+                        stub.doPrepare(messageId, cmd, myPort);
+                        util.log(map.get(server).status.toString());
+                    } catch (Exception ex) {
+                        util.log("Something went wrong when prepare, Abort");
+                        this.pendingPrepareAcks.get(messageId).put(server, new Ack(AckType.ABORT,ex.getMessage()));
+                    }
+
                 }
             }
+            this.pendingPrepareAcks.put(messageId,map);
+            if (AckReceived == 4) {
+                return "true";
+            }
+        }
+        return "false";
+    }
 
+
+    private String callCommitAndWaitForAck(UUID messageId, int timeout, int retry) {
+
+        int areAllAck = 0;
+        this.pendingCommitAcks.put(messageId, new ConcurrentHashMap<>());
+        while (retry >= 0) {
+            try {
+                Thread.sleep(timeout);
+            } catch (Exception ex) {
+                util.log("wait fail.");
+            }
+
+            areAllAck = 0;
+            retry--;
+            Map<Integer, Ack> map = this.pendingCommitAcks.get(messageId);
+
+            for (int server : this.otherServers) {
+                if (map.containsKey(server) && map.get(server).status == AckType.COMMITTED) {
+                    areAllAck++;
+                } else if(map.containsKey(server) && map.get(server).status == AckType.ABORT){
+                    globalAbort(messageId);
+                    return map.get(server).getErrMsg();
+                }else {
+                    util.log("Commit: Ask for commit for server " + server);
+                    try {
+                        this.pendingCommitAcks.get(messageId).put(server, new Ack());
+                        ServerInterface stub = (ServerInterface) Naming.lookup("rmi://localhost/MapService" + server);
+                        stub.doCommit(messageId, myPort);
+                    } catch (Exception ex) {
+                        util.log("Something went wrong when commit, Abort");
+
+                        this.pendingCommitAcks.get(messageId).put(server, new Ack(AckType.ABORT,ex.getMessage()));
+                    }
+
+
+                }
+            }
+            this.pendingCommitAcks.put(messageId,map);
             if (areAllAck == 4) {
-                return true;
+                return "true";
             }
         }
 
-        return false;
+        return "false";
     }
 
-    private void tellToPrepare(UUID messageId, String functionality, String key,
-        String value) {
 
-        this.pendingPrepareAcks.put(messageId, Collections.synchronizedMap(new HashMap<Integer, Ack>()));
+    private void globalAbort(UUID messageId) {
 
         for (int server : this.otherServers) {
-            callPrepare(messageId, functionality, key, value, server);
+            util.log("Abort: Ask for abort for server " + server);
+            try {
+                ServerInterface stub = (ServerInterface) Naming.lookup("rmi://localhost/MapService" + server);
+                stub.doAbort(messageId, myPort);
+            } catch (Exception ex) {
+                util.log("Something went wrong, removing data from temporary storage" + ex.getMessage());
+            }
+        }
+    }
+
+
+    @Override
+    public void acknowledge(UUID messageId, int yourPort, AckType type) throws RemoteException {
+        if(type == AckType.COMMITTED){
+            Map<Integer, Ack> temp = this.pendingCommitAcks.getOrDefault(messageId,new ConcurrentHashMap<>());
+            temp.put(yourPort, new Ack(type));
+            this.pendingCommitAcks.put(messageId, temp);
+        }else if(type == AckType.PREPARED){
+            Map<Integer, Ack> temp = this.pendingPrepareAcks.getOrDefault(messageId,new ConcurrentHashMap<>());
+            temp.put(yourPort, new Ack(type));
+            this.pendingPrepareAcks.put(messageId, temp);
         }
 
     }
 
-    private void tellToGo(UUID mesUuid) {
-        this.pendingGoAcks.put(mesUuid, Collections.synchronizedMap(new HashMap<Integer, Ack>()));
+    @Override
+    public void doCommit(UUID messageId, int callBackServer) throws RemoteException, InvalidParameterSpecException {
 
-        for (int server : this.otherServers) {
-            callGo(mesUuid, server);
-        }
-    }
+        String pendingCMD = this.pendingChanges.get(messageId);
 
-    private void callGo(UUID messageId, int server) {
-        try {
-            Ack a = new Ack();
-            a.isAcked = false;
-            this.pendingGoAcks.get(messageId).put(server, a);
-            Registry registry = LocateRegistry.getRegistry(server);
-            ServerInterface stub = (ServerInterface) registry.lookup("compute.ServerInterface");
-            stub.go(messageId, myPort);
-        } catch (Exception ex) {
-            hl.log("Something went wrong in sending go, removing data from temporary storage");
-        }
-
-        hl.log("call go for worked. target: " + server);
-    }
-
-    private void callPrepare(UUID messageId, String functionality, String key, String value, int server) {
-        try {
-            Ack a = new Ack();
-            a.isAcked = false;
-            this.pendingPrepareAcks.get(messageId).put(server, a);
-            Registry registry = LocateRegistry.getRegistry(server);
-            ServerInterface stub = (ServerInterface) registry.lookup("compute.ServerInterface");
-            stub.prepareKeyValue(messageId, functionality, key, value, myPort);
-        } catch (Exception ex) {
-            hl.log("Something went wrong in sending Ack, removing data from temporary storage");
-        }
-
-        hl.log("call prepare for worked. target: " + server);
-    }
-
-    public void ackMe(UUID messageId, int yourPort, AckType type) throws RemoteException {
-
-        if (type == AckType.ackGo) {
-            this.pendingGoAcks.get(messageId).get(yourPort).isAcked = true;
-        } else if (type == AckType.AkcPrepare) {
-            this.pendingPrepareAcks.get(messageId).get(yourPort).isAcked = true;
-        }
-        hl.log("Ack received from: " + yourPort);
-    }
-
-    public void go(UUID messageId, int callBackServer) throws RemoteException {
-
-        Value v = this.pendingChanges.get(messageId);
-
-        if (v == null) {
+        if (pendingCMD == null) {
             throw new IllegalArgumentException("The message is not in the storage");
         }
 
-        this.KeyValue(v.function, v.key, v.value);
+        this.process(pendingCMD);
         this.pendingChanges.remove(messageId);
-        this.sendAck(messageId, callBackServer, AckType.ackGo);
+        this.sendAck(messageId, callBackServer, AckType.COMMITTED);
     }
 
-    public void prepareKeyValue(UUID messageId, String functionality, String key,
-        String value, int callBackServer) throws RemoteException {
-
-        if (this.pendingChanges.containsKey(messageId)) {
-
-            sendAck(messageId, callBackServer, AckType.AkcPrepare);
+    @Override
+    public void doPrepare(UUID messageId, String cmd, int callBackServer) throws RemoteException {
+        if (!this.pendingChanges.containsKey(messageId)) {
+            this.pendingChanges.put(messageId, cmd);
         }
-
-        this.addToTempStorage(messageId, functionality, key, value);
-        sendAck(messageId, callBackServer, AckType.AkcPrepare);
+        sendAck(messageId, callBackServer, AckType.PREPARED);
     }
 
+    @Override
+    public void doAbort(UUID messageId, int callBackServer) throws RemoteException {
+        this.pendingChanges.remove(messageId);
+        sendAck(messageId, callBackServer, AckType.ABORT);
+    }
+
+    @Override
     public void setServersInfo(int[] otherServersPorts, int yourPort)
         throws RemoteException {
 
@@ -237,43 +288,15 @@ public class Server extends Thread implements ServerInterface {
         this.myPort = yourPort;
     }
 
-    public int getPort() throws RemoteException {
-
-        return this.myPort;
-    }
-
     private void sendAck(UUID messageId, int destination, AckType type) {
         try {
-            Registry registry = LocateRegistry.getRegistry(destination);
-            ServerInterface stub = (ServerInterface) registry.lookup("compute.ServerInterface");
-
-            stub.ackMe(messageId, myPort, type);
-
+            ServerInterface stub = (ServerInterface) Naming.lookup("rmi://localhost/MapService" + destination);
+            stub.acknowledge(messageId, myPort, type);
         } catch (Exception ex) {
-            hl.log("Something went wrong in sending Ack, removing data from temporary storage");
+            util.log("Something went wrong in sending Ack, will abort");
             this.pendingChanges.remove(messageId);
         }
     }
 
-    private void addToTempStorage(UUID messageId, String functionality,
-        String key, String value) {
-        Value v = new Value();
-        v.function = functionality;
-        v.key = key;
-        v.value = value;
 
-        this.pendingChanges.put(messageId, v);
-    }
-}
-
-class Value {
-
-    String function;
-    String key;
-    String value;
-}
-
-class Ack {
-
-    public boolean isAcked;
 }
