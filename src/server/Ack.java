@@ -1,6 +1,6 @@
 package server;
 
-import ENUM.AckType;
+import util.AckType;
 
 public class Ack {
     AckType status;

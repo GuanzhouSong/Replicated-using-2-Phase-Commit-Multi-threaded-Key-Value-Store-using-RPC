@@ -1,4 +1,4 @@
-package ENUM;
+package util;
 
 /**
  * @author song

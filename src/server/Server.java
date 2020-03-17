@@ -1,6 +1,6 @@
 package server;
 
-import ENUM.AckType;
+import util.AckType;
 import compute.ServerInterface;
 import java.rmi.Naming;
 import java.rmi.RemoteException;
@@ -8,12 +8,13 @@ import java.security.spec.InvalidParameterSpecException;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import util.CONST;
 import util.Util;
 
 
 public class Server extends Thread implements ServerInterface {
 
-    private int[] otherServers = new int[4];
+    private int[] otherServers = new int[CONST.serverNum-1];
     private int myPort;
     static Util util = new Util();
     private Map<String, String> map = new ConcurrentHashMap<>();
