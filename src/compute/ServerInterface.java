@@ -1,21 +1,26 @@
 package compute;
 
+import util.AckType;
 import java.rmi.Remote;
 import java.rmi.RemoteException;
+import java.security.spec.InvalidParameterSpecException;
 import java.util.UUID;
-import server.AckType;
 
 public interface ServerInterface extends Remote {
 
-    String KeyValue(UUID messageId, String functionality, String key, String value) throws RemoteException;
+    String process(UUID messageId, String cmd) throws InvalidParameterSpecException, RemoteException;
 
-    void ackMe(UUID messageId, int callBackServer, AckType type) throws RemoteException;
+    String process(String cmd) throws InvalidParameterSpecException, RemoteException;
+    //String KeyValue(UUID messageId, String functionality, String key, String value) throws RemoteException;
 
-    void go(UUID messageId, int callBackServer) throws RemoteException;
+    void acknowledge(UUID messageId, int callBackServer, AckType type) throws RemoteException;
 
-    void prepareKeyValue(UUID messageId, String functionality, String key, String value, int callBackServer) throws RemoteException;
+    void doAbort(UUID messageId, int callBackServer) throws RemoteException;
+
+    void doCommit(UUID messageId, int callBackServer) throws RemoteException, InvalidParameterSpecException;
+
+    void doPrepare(UUID messageId, String cmd, int callBackServer) throws RemoteException;
 
     void setServersInfo(int[] OtherServersPorts, int yourPorts) throws RemoteException;
 
-    int getPort() throws RemoteException;
 }
